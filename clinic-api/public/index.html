@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic appointments</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b2430; --mute:#667085; --line:#e4e7ec; --accent:#0f766e; --bad:#b42318; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:#fff; padding:20px 16px; }
+  header h1 { margin:0; font-size:22px; }
+  header p { margin:4px 0 0; opacity:.9; font-size:14px; }
+  main { max-width:860px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { margin:0 0 12px; font-size:17px; }
+  label { display:block; font-size:13px; color:var(--mute); margin-bottom:4px; }
+  input, select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
+  .row { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+  button { font:inherit; padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
+  button.danger { background:#fff; color:var(--bad); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .slots { display:grid; gap:8px; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); }
+  .slot { border:1px solid var(--line); border-radius:10px; padding:12px; background:#fff; text-align:left; color:var(--ink); }
+  .slot.taken { opacity:.45; }
+  .slot.selected { border-color:var(--accent); box-shadow:0 0 0 2px rgba(15,118,110,.2); }
+  .slot b { display:block; }
+  .slot small { color:var(--mute); }
+  .msg { margin-top:12px; padding:10px 12px; border-radius:8px; font-size:14px; }
+  .msg.ok { background:#ecfdf3; color:#067647; }
+  .msg.err { background:#fef3f2; color:var(--bad); }
+  .conf { border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:8px; display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap; }
+  .pill { font-size:12px; padding:2px 8px; border-radius:999px; background:#ecfdf3; color:#067647; }
+  .pill.cancelled { background:#fef3f2; color:var(--bad); }
+  code { font-size:13px; word-break:break-all; }
+  .muted { color:var(--mute); font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Clinic appointments</h1>
+  <p>Pick an open slot, book it, and get a confirmation.</p>
+</header>
+<main>
+  <section>
+    <h2>API key</h2>
+    <label for="key">Needed to talk to the API. It is kept only in this browser.</label>
+    <input id="key" type="password" placeholder="X-API-Key" autocomplete="off">
+  </section>
+
+  <section>
+    <h2>1. Available slots</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div>
+        <label for="provider">Provider</label>
+        <select id="provider"><option value="">All providers</option></select>
+      </div>
+      <div style="align-self:end"><button class="ghost" id="refresh">Refresh</button></div>
+    </div>
+    <div id="slots" class="slots"></div>
+    <div id="slotsMsg"></div>
+  </section>
+
+  <section>
+    <h2>2. Book the selected slot</h2>
+    <p class="muted" id="chosen">No slot selected yet.</p>
+    <form id="form">
+      <div class="row">
+        <div><label for="name">Full name</label><input id="name" required></div>
+        <div><label for="email">Email</label><input id="email" type="email" required></div>
+      </div>
+      <p><button id="bookBtn" type="submit" disabled>Book appointment</button></p>
+    </form>
+    <div id="bookMsg"></div>
+    <div id="confirmation"></div>
+  </section>
+
+  <section>
+    <h2>3. My bookings</h2>
+    <div class="row">
+      <div><label for="lookup">Email</label><input id="lookup" type="email" placeholder="you@example.com"></div>
+      <div style="align-self:end"><button class="ghost" id="lookupBtn">Show my bookings</button></div>
+    </div>
+    <div id="mine"></div>
+    <p><button class="ghost" id="more" style="display:none">Load more</button></p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let selected = null;
+let nextCursor = null;
+
+// The key can be supplied once via the link: /app/#key=YOUR_KEY
+const fromHash = new URLSearchParams(location.hash.slice(1)).get("key");
+if (fromHash) { try { localStorage.setItem("clinic_key", fromHash); } catch (e) {} history.replaceState(null, "", location.pathname); }
+try { $("key").value = localStorage.getItem("clinic_key") || ""; } catch (e) {}
+$("key").addEventListener("change", () => { try { localStorage.setItem("clinic_key", $("key").value.trim()); } catch (e) {} loadSlots(); });
+
+async function api(path, opts = {}) {
+  const res = await fetch(path.startsWith("/") ? path : "/" + path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "X-API-Key": $("key").value.trim(), ...(opts.headers || {}) },
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) {}
+  return { status: res.status, body, res };
+}
+
+const fmt = (iso) => new Date(iso).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const say = (el, text, ok) => { el.innerHTML = text ? `<div class="msg ${ok ? "ok" : "err"}">${esc(text)}</div>` : ""; };
+
+async function loadSlots() {
+  say($("slotsMsg"), "");
+  const p = $("provider").value;
+  const { status, body } = await api("/slots" + (p ? "?provider=" + encodeURIComponent(p) : ""));
+  if (status === 401) { $("slots").innerHTML = ""; return say($("slotsMsg"), "Enter a valid API key above to see slots.", false); }
+  if (status !== 200) return say($("slotsMsg"), (body && body.error) || "Could not load slots.", false);
+
+  if (!p && $("provider").options.length === 1) {
+    [...new Set(body.slots.map((s) => s.provider))].filter(Boolean).forEach((name) => {
+      const o = document.createElement("option"); o.value = name; o.textContent = name; $("provider").appendChild(o);
+    });
+  }
+  const upcoming = body.slots.filter((s) => new Date(s.start) > new Date());
+  if (!upcoming.length) { $("slots").innerHTML = ""; return say($("slotsMsg"), "No upcoming slots.", false); }
+  $("slots").innerHTML = "";
+  upcoming.forEach((s) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "slot" + (s.available ? "" : " taken") + (selected && selected.id === s.id ? " selected" : "");
+    b.disabled = !s.available;
+    b.innerHTML = `<b>${esc(fmt(s.start))}</b><small>${esc(s.provider || "")}${s.available ? "" : " · booked"}</small>`;
+    b.onclick = () => { selected = s; $("chosen").textContent = `Selected: ${fmt(s.start)} with ${s.provider || "provider"}`; $("bookBtn").disabled = false; loadSlots(); };
+    $("slots").appendChild(b);
+  });
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!selected) return;
+  $("bookBtn").disabled = true;
+  say($("bookMsg"), "");
+  const { status, body, res } = await api("/bookings", {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({ slot_id: selected.id, name: $("name").value, email: $("email").value }),
+  });
+  if (status === 201) {
+    say($("bookMsg"), "Your appointment is booked.", true);
+    $("confirmation").innerHTML = `<div class="conf"><div><b>Confirmation</b><br><span class="muted">${esc(fmt(selected.start))} · ${esc(selected.provider || "")}</span><br>Booking ID: <code>${esc(body.id)}</code></div><span class="pill">${esc(body.status)}</span></div>`;
+    selected = null; $("chosen").textContent = "No slot selected yet."; $("lookup").value = body.email;
+    loadSlots(); loadMine(true);
+  } else if (status === 409) { say($("bookMsg"), "Sorry, that slot was just taken. Pick another.", false); selected = null; $("chosen").textContent = "No slot selected yet."; loadSlots(); }
+  else if (status === 429) { say($("bookMsg"), `Too many attempts. Try again in ${res.headers.get("Retry-After") || "a minute"}s.`, false); $("bookBtn").disabled = false; }
+  else { say($("bookMsg"), (body && body.error) || "Booking failed.", false); $("bookBtn").disabled = !selected; }
+});
+
+async function loadMine(reset) {
+  const email = $("lookup").value.trim();
+  if (!email) return;
+  if (reset) { $("mine").innerHTML = ""; nextCursor = null; }
+  const q = `/bookings?email=${encodeURIComponent(email)}&limit=5` + (nextCursor ? "&cursor=" + encodeURIComponent(nextCursor) : "");
+  const { status, body } = await api(q);
+  if (status !== 200) { $("mine").innerHTML = `<div class="msg err">${esc((body && body.error) || "Could not load bookings.")}</div>`; return; }
+  if (reset && !body.bookings.length) $("mine").innerHTML = `<p class="muted">No bookings for that email.</p>`;
+  body.bookings.forEach((b) => {
+    const d = document.createElement("div"); d.className = "conf";
+    d.innerHTML = `<div>Slot <code>${esc(b.slot_id)}</code><br><span class="muted">ID: ${esc(b.id)}</span></div><div><span class="pill ${b.status}">${esc(b.status)}</span> ${b.status === "confirmed" ? '<button class="danger">Cancel</button>' : ""}</div>`;
+    const btn = d.querySelector("button");
+    if (btn) btn.onclick = async () => { const r = await api("/bookings/" + encodeURIComponent(b.id), { method: "DELETE" }); if (r.status === 200) { loadMine(true); loadSlots(); } else { alert((r.body && r.body.error) || "Could not cancel."); } };
+    $("mine").appendChild(d);
+  });
+  nextCursor = body.next_cursor;
+  $("more").style.display = nextCursor ? "" : "none";
+}
+$("lookupBtn").onclick = () => loadMine(true);
+$("more").onclick = () => loadMine(false);
+$("refresh").onclick = loadSlots;
+$("provider").onchange = loadSlots;
+loadSlots();
+</script>
+</body>
+</html>
